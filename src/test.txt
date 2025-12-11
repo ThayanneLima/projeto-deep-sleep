@@ -1,0 +1,248 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <Adafruit_INA219.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_BMP280.h>
+#include <wiFi.h>
+#include <PubSubClient.h>
+
+#define OLED_SDA 4
+#define OLED_SCL 15
+#define OLED_RST 16
+#define OLED_ADDR 0x3C
+
+Adafruit_SSD1306 display(128, 64, &Wire, OLED_RST);
+
+Adafruit_INA219 ina219(0x40);
+
+// Configurações da API
+const char *host = "api.thingspeak.com";       // Este não altera
+const int httpPort = 80;                       // Este não altera
+const String channelID = "3165224";            // COLOCAR O SEU CHANNELID
+const String writeApiKey = "LJ9592VTW4FD06P3"; // COLOCAR A SUA KEY
+void readResponse(WiFiClient *client);
+
+float batteryVoltage = 0.0;
+float batteryCurrent = 0.0;
+
+// === Sensor BMP280 ===
+Adafruit_BMP280 bmp;
+
+// === Dados do Wifi ===
+const char *ssid = "Instructiva_Group";
+const char *password = "Familia10k*#";
+const char *mqtt_server = "test.mosquitto.org";
+
+unsigned long lastMsg = 0;
+float temperatura = 0;
+float pressao = 0;
+
+unsigned long displayTime = 0;
+
+int n_packet = 0;
+
+enum OperationMode
+{
+  MODE_ACTIVE,      // more than 4.0V
+  MODE_MODEM_SLEEP, // 3.8V to 4.0V
+  MODE_LIGHT_SLEEP, // 3.7V to 3.8V
+  MODE_DEEP_SLEEP,  // 3.5V to 3.7V
+  MODE_HIBERNATION  // less than 3.5V
+};
+
+OperationMode operationMode;
+
+unsigned long lastSentData = 0;
+
+void setup()
+{
+  Serial.begin(115200);
+  WiFi.begin(ssid, password);
+  Serial.println("Aguardando conexão...");
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("WiFi Conectado...");
+
+  // Display
+  pinMode(OLED_RST, OUTPUT);
+  digitalWrite(OLED_RST, LOW);
+  delay(10);
+  digitalWrite(OLED_RST, HIGH);
+  delay(10);
+  Wire.begin(OLED_SDA, OLED_SCL);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR))
+  {
+    Serial.println("Falha ao iniciar o display OLED!");
+    while (true)
+      ;
+  }
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("Iniciando...");
+  display.display();
+
+  // INA219
+  if (!ina219.begin())
+  {
+    Serial.println("Falha no INA219");
+  }
+  ina219.setCalibration_32V_1A();
+
+  operationMode = MODE_ACTIVE;
+
+  // Inicia BMP280
+  if (!bmp.begin(0x76))
+  { // ou 0x77 dependendo do seu sensor
+    Serial.println("Sensor BMP280 nao encontrado!");
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Erro BMP280!");
+    display.display();
+    while (true)
+      ;
+  }
+
+  Serial.println("Sensor BMP280 iniciado.");
+
+}
+
+void loop()
+{
+  unsigned long start = millis();
+
+  batteryCurrent = ina219.getCurrent_mA();
+  batteryVoltage = ina219.getBusVoltage_V() + (ina219.getShuntVoltage_mV() / 1000.0);
+
+  // Operation mode
+  if (batteryVoltage >= 4.0)
+  {
+    operationMode = MODE_ACTIVE;
+  }
+  else if (batteryVoltage >= 3.8)
+  {
+    operationMode = MODE_MODEM_SLEEP;
+  }
+  else if (batteryVoltage >= 3.7)
+  {
+    operationMode = MODE_LIGHT_SLEEP;
+  }
+  else if (batteryVoltage >= 3.5)
+  {
+    operationMode = MODE_DEEP_SLEEP;
+  }
+  else
+  {
+    operationMode = MODE_HIBERNATION;
+  }
+
+  display.clearDisplay();
+
+  switch (operationMode)
+  {
+  case MODE_ACTIVE:
+    // Serial.println("Modo Ativo");
+    display.setCursor(0, 30);
+    display.printf("Modo Ativo");
+    break;
+
+  case MODE_MODEM_SLEEP:
+    // Serial.println("Modo Modem Sleep");
+    display.setCursor(0, 30);
+    display.printf("Modo Modem Sleep");
+    // WiFi.disconnect(true);
+    // esp_light_sleep_start();
+    break;
+
+  case MODE_LIGHT_SLEEP:
+    // Serial.println("Modo Light Sleep");
+    display.setCursor(0, 30);
+    display.printf("Modo Light Sleep");
+    // esp_light_sleep_start();
+    break;
+
+  case MODE_DEEP_SLEEP:
+    display.setCursor(0, 30);
+    display.printf("Modo Deep Sleep");
+    // Serial.println("Modo Deep Sleep");
+    // esp_deep_sleep_start();
+    break;
+
+  case MODE_HIBERNATION:
+    display.setCursor(0, 30);
+    display.printf("Modo Hibernacao");
+    // Serial.println("Modo Hibernação");
+    // esp_deep_sleep_start();
+    break;
+  }
+
+  display.setCursor(0, 0);
+  display.printf("Bateria:");
+  display.setCursor(0, 10);
+  display.printf("%.1fmA", batteryCurrent);
+  display.setCursor(0, 20);
+  display.printf("%.1fV", batteryVoltage);
+  display.display();
+
+  WiFiClient client;
+  String footer = String(" HTTP/1.1\r\n") + "Host: " + String(host) + "\r\n" + "Connection: close\r\n\r\n";
+
+  float temperatura = bmp.readTemperature();   // °C
+  float pressao = bmp.readPressure() / 100.0F; // hPa
+
+  Serial.printf("Temperatura: %.2f C\n", temperatura);
+  Serial.printf("Pressao: %.2f hPa\n", pressao);
+
+  if (millis() - lastSentData < 16000)
+  {
+
+    if (!client.connect(host, httpPort))
+    {
+      return;
+    }
+    client.print("GET /update?api_key=" + writeApiKey + "&field1=" + batteryCurrent + footer);
+    readResponse(&client);
+    lastSentData = millis();
+  }
+
+  // delay(16000);
+  // if (!client.connect(host, httpPort))
+  //{
+  //   return;
+  // }
+  // client.print("GET /update?api_key=" + writeApiKey + "&field2=" + pressao + footer);
+  // readResponse(&client);
+
+  //if (start - millis() < 50)
+  //{
+  //  delay(50 - (start - millis()));
+  //}
+  Serial.printf("Loop time: %lu ms\n", millis() - start);
+}
+
+void readResponse(WiFiClient *client)
+{
+  unsigned long timeout = millis();
+  while (client->available() == 0)
+  {
+    if (millis() - timeout > 5000)
+    {
+      Serial.println(">>> Client Timeout !");
+      client->stop();
+      return;
+    }
+  }
+
+  while (client->available())
+  {
+    String line = client->readStringUntil('\r');
+    Serial.print(line);
+  }
+
+  Serial.printf("\nClosing connection\n\n");
+}
