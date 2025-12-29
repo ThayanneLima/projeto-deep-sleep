@@ -50,16 +50,16 @@ void do_send(osjob_t *j);
 // String url = "http://192.168.0.105:4041/iot/json";
 
 // config for  DHT Lorawan
-static const PROGMEM u1_t NWKSKEY[16] = {0xA0, 0x1B, 0xA7, 0x6C, 0xA3, 0x14, 0xC4, 0xA4, 0x5D, 0x9F, 0xE1, 0x0E, 0xE5, 0x63, 0x15, 0x0F};
+static const PROGMEM u1_t NWKSKEY[16] = {0x49, 0x67, 0x69, 0x68, 0x9C, 0xB7, 0xE9, 0xDC, 0xBD, 0x80, 0x66, 0xE9, 0xBA, 0x5A, 0x68, 0xDD};
 
 // LoRaWAN AppSKey, application session key
 // This should also be in big-endian (aka msb).
-static const u1_t PROGMEM APPSKEY[16] = {0x0C, 0xD0, 0xDF, 0x1D, 0xAE, 0x72, 0x21, 0xC8, 0xC7, 0xF1, 0xA9, 0xBF, 0xAE, 0xBE, 0x89, 0x59};
+static const u1_t PROGMEM APPSKEY[16] = {0x62, 0x24, 0x40, 0xC0, 0xD8, 0x14, 0x80, 0x80, 0x0A, 0x08, 0x3D, 0x81, 0xC9, 0xC9, 0xBE, 0x84};
 
 // LoRaWAN end-device address (DevAddr)
 // See http://thethingsnetwork.org/wiki/AddressSpace
 // The library converts the address to network byte order as needed, so this should be in big-endian (aka msb) too.
-static const u4_t DEVADDR = 0x260D32EF;
+static const u4_t DEVADDR = 0x260D45C0;
 
 int n_packet = 0;
 // These callbacks are only used in over-the-air activation, so they are
@@ -356,7 +356,7 @@ void setup()
   Serial.println("Iniciando");
 
   // Inicializa o barramento I2C nos pinos GPIO 21 (SDA) e GPIO 22 (SCL)
-  Wire.begin(21, 22);
+  Wire.begin(4, 15);
 
   setupLoRaWAN();
 
@@ -375,7 +375,7 @@ void setup()
   delay(10);
   digitalWrite(OLED_RST, HIGH);
   delay(10);
-  Wire.begin(OLED_SDA, OLED_SCL);
+  //Wire.begin(OLED_SDA, OLED_SCL);
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR))
   {
     Serial.println("Falha ao iniciar o display OLED!");
