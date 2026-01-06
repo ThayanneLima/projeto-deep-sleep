@@ -1,4 +1,4 @@
-//importação de biblioteca
+//importação de biblioteca - Versão de envio com sucesso
 #include <Arduino.h> //caso não utilizar Arduino IDE
 #include <lmic.h>
 #include <Wire.h>
