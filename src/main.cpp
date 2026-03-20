@@ -1,4 +1,4 @@
-// importação de biblioteca - Versão de envio com sucesso
+// importação de biblioteca - Versão OTAA
 #include <Arduino.h> //caso não utilizar Arduino IDE
 #include <lmic.h>
 #include <Wire.h>
@@ -16,35 +16,32 @@
 #define OLED_RST 16
 #define OLED_ADDR 0x3C
 
-#define LORA_GAIN 20
-
-// Tempo de deep sleep em microssegundos (15 segundos)
-#define SLEEP_TIME 15000000
+// Tempo de deep sleep em microssegundos (120 segundos)
+#define SLEEP_TIME 120000000
+// Tempo de deep sleep quando bateria está crítica (600 segundos)
+#define SLEEP_TIME_LOW_BATTERY 600000000
+// Tensão mínima da bateria antes de aumentar o intervalo
+#define BATTERY_MIN_VOLTAGE 3.6
 
 Adafruit_SSD1306 display(128, 64, &Wire, OLED_RST);
 Adafruit_INA219 ina219(0x40);
 
 // payload para envio
-uint8_t payload[10];
-
-uint8_t txBuffer[10];
-int n_packet = 0;
+uint8_t payload[9];
 
 // PROTÓTIPOS DE FUNÇÕES
 void sensors_build_payload();
 void sensors_setup();
 
-#define CFG_au915
-
 // configuração de padrão de segurança
 // descomentar a configuração desejada
-// #define USE_OTAA
-#define USE_ABP
+#define USE_OTAA
+// #define USE_ABP
 
 #ifdef USE_ABP                                                                                                                            // dados atualizados
-static const PROGMEM u1_t NWKSKEY[16] = {0xD0, 0x1F, 0xDF, 0x26, 0x49, 0x28, 0xEA, 0xD4, 0x50, 0x67, 0x01, 0x27, 0x50, 0x49, 0x92, 0x25}; // msb format
-static const u1_t PROGMEM APPSKEY[16] = {0x74, 0x18, 0xC3, 0x17, 0x06, 0x8C, 0x9D, 0xC4, 0xE3, 0xAB, 0x0D, 0x36, 0xD3, 0x89, 0x12, 0xAF}; // msb format
-static const u4_t DEVADDR = 0x260D11DF;
+static const PROGMEM u1_t NWKSKEY[16] = {0xD2, 0xAF, 0x51, 0xA7, 0xE5, 0x1B, 0x8E, 0xC8, 0xA6, 0x0D, 0x43, 0x84, 0xCE, 0x48, 0xFD, 0x3A}; // msb format
+static const u1_t PROGMEM APPSKEY[16] = {0xF5, 0x9D, 0x4E, 0x58, 0x41, 0x51, 0x1C, 0x36, 0xAE, 0x04, 0xF9, 0xCB, 0x77, 0x6B, 0x54, 0x82}; // msb format
+static const u4_t DEVADDR = 0x260DB618;
 void os_getArtEui(u1_t *buf) {}
 void os_getDevEui(u1_t *buf) {}
 void os_getDevKey(u1_t *buf) {}
@@ -59,25 +56,6 @@ static const u1_t PROGMEM APPKEY[16] = {0xFD, 0xE1, 0x58, 0x5F, 0x53, 0x5E, 0x1D
 void os_getDevKey(u1_t *buf) { memcpy_P(buf, APPKEY, 16); }
 #endif
 
-enum OperationMode
-{
-  MODE_ACTIVE,      // more than 4.0V
-  MODE_MODEM_SLEEP, // 3.8V to 4.0V
-  MODE_LIGHT_SLEEP, // 3.7V to 3.8V
-  MODE_DEEP_SLEEP,  // 3.5V to 3.7V
-  MODE_HIBERNATION  // less than 3.5V
-};
-
-/*
-0 → ACTIVE
-1 → MODEM_SLEEP
-2 → LIGHT_SLEEP
-3 → DEEP_SLEEP
-4 → HIBERNATION
-*/
-
-OperationMode operationMode;
-
 float batteryVoltage = 0.0;
 float batteryCurrent = 0.0;
 
@@ -87,14 +65,15 @@ Adafruit_BMP280 bmp;
 unsigned long lastMsg = 0;
 float temperatura = 0;
 float pressao = 0;
-float energy_Wh = 0.0;
-unsigned long lastEnergyMs = 0;
+float p = 0.0; // potência em W
+RTC_DATA_ATTR float energy_Wh = 0.0;
+RTC_DATA_ATTR bool bateria_critica = false;
 
 // objeto que será mandado para a função do_send()
 static osjob_t sendjob;
 
 // intervalo de envio
-const unsigned TX_INTERVAL = 20;
+const unsigned TX_INTERVAL = 120;
 
 // Mapa de pinos Heltec ESP32Lora v2
 const lmic_pinmap lmic_pins = {
@@ -109,6 +88,22 @@ void do_send(osjob_t *j);
 // Callback de evento: todo evento do LoRaAN irá chamar essa
 // callback, de forma que seja possível saber o status da
 // comunicação com o gateway LoRaWAN.
+
+void entrarDeepSleep()
+{
+  if (bateria_critica)
+  {
+    Serial.println("Bateria critica! Sleep estendido (600s)...");
+    esp_sleep_enable_timer_wakeup(SLEEP_TIME_LOW_BATTERY);
+  }
+  else
+  {
+    Serial.println("Entrando em Deep Sleep...");
+    esp_sleep_enable_timer_wakeup(SLEEP_TIME);
+  }
+  esp_deep_sleep_start();
+}
+
 void onEvent(ev_t ev)
 {
   Serial.print(os_getTime());
@@ -156,8 +151,7 @@ void onEvent(ev_t ev)
       Serial.print(F("Dados recebidos: "));
       Serial.write(dados_recebidos);
     }
-    // Agenda a transmissão automática com intervalo de TX_INTERVAL
-    os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL), do_send);
+    entrarDeepSleep();
     break;
   case EV_LOST_TSYNC:
     Serial.println(F("EV_LOST_TSYNC"));
@@ -199,88 +193,18 @@ void sensors_setup()
   // Temperatura e pressão representativas do bloco de código BMP280
   temperatura = bmp.readTemperature();   // °C
   pressao = bmp.readPressure() / 100.0F; // hPa
-
-  // Cálculo de energia acumulada
-  float v = batteryVoltage;          // V
-  float i = batteryCurrent / 1000.0; // A  (porque vem em mA)
-  float p = v * i;                   // W
+  p = ina219.getPower_mW() / 1000.0;
 
   energy_Wh += p * (TX_INTERVAL / 3600.0); // Wh
   Serial.printf("Energia acumulada: %.5f Wh\n", energy_Wh);
 
-  // Definição do modo de operação baseado na tensão da bateria
-  if (batteryVoltage >= 4.0)
-  {
-    operationMode = MODE_ACTIVE;
-  }
-  else if (batteryVoltage >= 3.8)
-  {
-    operationMode = MODE_MODEM_SLEEP;
-  }
-  else if (batteryVoltage >= 3.7)
-  {
-    operationMode = MODE_LIGHT_SLEEP;
-  }
-  else if (batteryVoltage >= 3.5)
-  {
-    operationMode = MODE_DEEP_SLEEP;
-  }
-  else
-  {
-    operationMode = MODE_HIBERNATION;
-  }
-
-  // operationMode = MODE_ACTIVE;
   display.clearDisplay();
-
-  switch (operationMode)
-  {
-  case MODE_ACTIVE:
-    // Serial.println("Modo Ativo");
-    display.setCursor(0, 30);
-    break;
-
-  case MODE_MODEM_SLEEP:
-    // Serial.println("Modo Modem Sleep");
-    display.setCursor(0, 30);
-    display.printf("Modo Modem Sleep");
-    Serial.println("Modo Modem Sleep");
-    WiFi.setSleep(true);
-
-    break;
-
-  case MODE_LIGHT_SLEEP:
-    // Serial.println("Modo Light Sleep");
-    display.setCursor(0, 30);
-    display.printf("Modo Light Sleep");
-    Serial.println("Modo Light Sleep");
-    esp_sleep_enable_timer_wakeup(SLEEP_TIME);
-    esp_light_sleep_start();
-    break;
-
-  case MODE_DEEP_SLEEP:
-    display.setCursor(0, 30);
-    display.printf("Modo Deep Sleep");
-    Serial.println("Modo Deep Sleep");
-
-    esp_sleep_enable_timer_wakeup(SLEEP_TIME);
-    esp_deep_sleep_start();
-    break;
-
-  case MODE_HIBERNATION: // O ESP32 não tem hibernação no Arduino.Só no ESP-IDF (e funciona igual ao deep sleep, mas com mais domínios desligados).
-    display.setCursor(0, 30);
-    display.printf("Modo Hibernacao");
-    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF); // Mas isso não é “hibernação real”, é só deep sleep mais agressivo.
-    esp_deep_sleep_start();
-    break;
-  }
-
   display.setCursor(0, 0);
   display.printf("Bateria:");
   display.setCursor(0, 10);
-  display.printf("%.1fV", batteryVoltage);
-  display.setCursor(0, 20);
   display.printf("%.1fmA", batteryCurrent);
+  display.setCursor(0, 20);
+  display.printf("%.1fV", batteryVoltage);
   display.display();
 
   Serial.printf("Tensão da bateria: %.2f V\n", batteryVoltage);
@@ -289,14 +213,13 @@ void sensors_setup()
   Serial.printf("Pressao: %.2f hPa\n", pressao);
 }
 
-void sensors_build_payload(uint8_t payload[10])
+void sensors_build_payload()
 {
   sensors_setup();
   int16_t voltage_mv = static_cast<int16_t>(batteryVoltage * 1000);
-  int16_t current_ma = static_cast<int16_t>(batteryCurrent * 100);
+  int16_t current_ma = static_cast<int16_t>(batteryCurrent);
   // int16_t temperature_c = static_cast<int16_t>(temperatura * 100);
   // int32_t pressure_pa = static_cast<int32_t>(pressao * 100);
-  // uint16_t energy_x100 = (uint16_t)(energy_Wh * 100.0); // Wh com 2 casas
   uint32_t energy_mWh = (uint32_t)(energy_Wh * 1000000.0); // mWh
 
   payload[0] = (voltage_mv >> 8) & 0xFF;
@@ -312,139 +235,52 @@ void sensors_build_payload(uint8_t payload[10])
   payload[5] = (energy_mWh >> 16) & 0xFF;
   payload[6] = (energy_mWh >> 8) & 0xFF;
   payload[7] = energy_mWh & 0xFF;
-
-  payload[8] = (uint8_t)(operationMode);
-
-  /* Preenche os bytes restantes com zeros (ou use-os para outros dados, se necessário)
-  for (int i = 9; i < 12; i++) {
-    txBuffer[i] = 0;
-  }*/
+  payload[8] = bateria_critica ? 0x01 : 0x00;
 }
 
 void do_send(osjob_t *j)
 {
-  // static uint8_t payload[] = "Hello, world!";
+  sensors_build_payload();
 
-  // Verifica se não está ocorrendo uma transmissão no momento TX/RX
+  if (batteryVoltage > 0 && batteryVoltage <= BATTERY_MIN_VOLTAGE)
+  {
+    bateria_critica = true;
+    Serial.printf("ALERTA: Bateria baixa! %.2fV - intervalo de sleep aumentado para 600s\n", batteryVoltage);
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.printf("BATERIA BAIXA!");
+    display.setCursor(0, 10);
+    display.printf("%.2fV", batteryVoltage);
+    display.display();
+  }
+  else
+  {
+    bateria_critica = false;
+  }
+
   if (LMIC.opmode & OP_TXRXPEND)
   {
     Serial.println(F("OP_TXRXPEND, not sending"));
   }
   else
   {
-    // envio
-    // LMIC_setTxData2(1, payload, sizeof(payload) - 1, 0);
-    // Serial.println(F("Sended"));
-    sensors_build_payload(payload);
-    Serial.print("TX bytes: ");
-    for (int k = 0; k < 10; k++)
-    {
-      Serial.printf("%02X ", payload[k]);
-    }
-    Serial.println();
-
-    // n_packet++;
-    LMIC_setTxData2(1, payload, sizeof(payload), 0); // é responsável por enviar os dados no uplink para o servidor LoRaWAN
-    Serial.println(F("Packet queued"));
+    LMIC_setTxData2(1, payload, sizeof(payload), 0);
+    Serial.println(F("Sended"));
   }
 }
 
 void setup()
 {
-
-  // inicialização da serial
-  Serial.begin(115200);
-  Serial.println(F("Iniciando..."));
-
-  // LMIC init
-  os_init();
-  // Reset the MAC state. Session and pending data transfers will be discarded.
-  LMIC_reset();
-
-  // aqui começa a mudar
 #ifdef USE_ABP
   uint8_t appskey[sizeof(APPSKEY)];
   uint8_t nwkskey[sizeof(NWKSKEY)];
   memcpy_P(appskey, APPSKEY, sizeof(APPSKEY));
   memcpy_P(nwkskey, NWKSKEY, sizeof(NWKSKEY));
   LMIC_setSession(0x13, DEVADDR, nwkskey, appskey);
-
-// aqui começa a mudar
-#else
-  // If not running an AVR with PROGMEM, just use the arrays directly
-  LMIC_setSession(0x13, DEVADDR, NWKSKEY, APPSKEY);
 #endif
 
-#if defined(CFG_eu868)
-  // Set up the channels used by the Things Network, which corresponds
-  // to the defaults of most gateways. Without this, only three base
-  // channels from the LoRaWAN specification are used, which certainly
-  // works, so it is good for debugging, but can overload those
-  // frequencies, so be sure to configure the full frequency range of
-  // your network here (unless your network autoconfigures them).
-  // Setting up channels should happen after LMIC_setSession, as that
-  // configures the minimal channel set. The LMIC doesn't let you change
-  // the three basic settings, but we show them here.
-  LMIC_setupChannel(0, 868100000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);  // g-band
-  LMIC_setupChannel(1, 868300000, DR_RANGE_MAP(DR_SF12, DR_SF7B), BAND_CENTI); // g-band
-  LMIC_setupChannel(2, 868500000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);  // g-band
-  LMIC_setupChannel(3, 867100000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);  // g-band
-  LMIC_setupChannel(4, 867300000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);  // g-band
-  LMIC_setupChannel(5, 867500000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);  // g-band
-  LMIC_setupChannel(6, 867700000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);  // g-band
-  LMIC_setupChannel(7, 867900000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);  // g-band
-  LMIC_setupChannel(8, 868800000, DR_RANGE_MAP(DR_FSK, DR_FSK), BAND_MILLI);   // g2-band
-                                                                               // LMIC_setupChannel(8, 994000000, DR_RANGE_MAP(DR_FSK,  DR_FSK),  2);      // g2-band
-  // TTN defines an additional channel at 869.525Mhz using SF9 for class B
-  // devices' ping slots. LMIC does not have an easy way to define set this
-  // frequency and support for class B is spotty and untested, so this
-  // frequency is not configured here.
-#elif defined(CFG_us915) || defined(CFG_au915)
-  // NA-US and AU channels 0-71 are configured automatically
-  // but only one group of 8 should (a subband) should be active
-  // TTN recommends the second sub band, 1 in a zero based count.
-  // https://github.com/TheThingsNetwork/gateway-conf/blob/master/US-global_conf.json
-  LMIC_selectSubBand(1);
-
-#elif defined(CFG_as923)
-  // Set up the channels used in your country. Only two are defined by default,
-  // and they cannot be changed.  Use BAND_CENTI to indicate 1% duty cycle.
-  // LMIC_setupChannel(0, 923200000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);
-  // LMIC_setupChannel(1, 923400000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);
-
-  // ... extra definitions for channels 2..n here
-#elif defined(CFG_kr920)
-  // Set up the channels used in your country. Three are defined by default,
-  // and they cannot be changed. Duty cycle doesn't matter, but is conventionally
-  // BAND_MILLI.
-  // LMIC_setupChannel(0, 922100000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_MILLI);
-  // LMIC_setupChannel(1, 922300000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_MILLI);
-  // LMIC_setupChannel(2, 922500000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_MILLI);
-
-  // ... extra definitions for channels 3..n here.
-#elif defined(CFG_in866)
-  // Set up the channels used in your country. Three are defined by default,
-  // and they cannot be changed. Duty cycle doesn't matter, but is conventionally
-  // BAND_MILLI.
-  // LMIC_setupChannel(0, 865062500, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_MILLI);
-  // LMIC_setupChannel(1, 865402500, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_MILLI);
-  // LMIC_setupChannel(2, 865985000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_MILLI);
-
-  // ... extra definitions for channels 3..n here.
-#else
-#error Region not supported
-#endif
-
-  // Disable link check validation
-  LMIC_setLinkCheckMode(0);
-
-  // TTN uses SF9 for its RX2 window.
-  LMIC.dn2Dr = DR_SF10;
-
-  // Set data rate and transmit power for uplink
-  LMIC_setDrTxpow(DR_SF12, LORA_GAIN);
-  // aqui termina a mudança
-  // #endif
+  Serial.begin(115200);
+  Serial.println(F("Starting"));
 
   // Display
   pinMode(OLED_RST, OUTPUT);
@@ -494,6 +330,11 @@ void setup()
   Serial.println("Sensor BMP280 iniciado.");
 
   sensors_setup();
+
+  // LMIC init
+  os_init();
+  // Reset the MAC state. Session and pending data transfers will be discarded.
+  LMIC_reset();
 
   do_send(&sendjob); // Start
 }
